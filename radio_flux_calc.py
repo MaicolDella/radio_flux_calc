@@ -29,7 +29,7 @@ def create_region_mask(region_path, wcs, shape):
                 
     return full_mask
 
-def process_image(img_path, source_reg_path, noise_reg_path, fits_mask_path=None):
+def process_image(img_path, source_reg_path, noise_reg_path, fits_mask_path=None, flux_scale_err=0.10):
     """Extracts data, applies masks, and calculates all requested statistics."""
     # 1. Load Image Data
     with fits.open(img_path) as hdul:
@@ -71,22 +71,27 @@ def process_image(img_path, source_reg_path, noise_reg_path, fits_mask_path=None
     stats['mean_flux_jy_beam'] = np.mean(source_pixels)
     stats['flux_jy'] = np.sum(source_pixels) / beam_area_pix
     
-    # Integrated noise: RMS_beam * sqrt(N_beams)
+    # Integrated thermal noise: RMS_beam * sqrt(N_beams)
     # Using robust noise (MAD) as the baseline for radio astronomy
     stats['integrated_noise_jy'] = stats['noise_robust'] * np.sqrt(stats['n_beams'])
 
+    # Total Flux Error: Sqrt( Thermal_Noise^2 + (Flux_Scale_Error * Total_Flux)^2 )
+    stats['calibration_error_jy'] = flux_scale_err * stats['flux_jy']
+    stats['total_flux_error_jy'] = np.sqrt(stats['integrated_noise_jy']**2 + stats['calibration_error_jy']**2)
+
     return stats
 
-def print_stats(name, stats):
+def print_stats(name, stats, flux_scale_err):
     """Nicely formats and prints the results."""
-    print(f"\n{'='*40}")
+    print(f"\n{'='*50}")
     print(f"Results for: {name}")
-    print(f"{'='*40}")
+    print(f"{'='*50}")
     
     print("\n--- Source Region ---")
-    print(f"Total Flux:        {stats['flux_jy']:.6f} Jy")
+    print(f"Total Flux:        {stats['flux_jy']:.6f} +/- {stats['total_flux_error_jy']:.6f} Jy")
+    print(f"  -> Thermal Int. Noise: {stats['integrated_noise_jy']:.6f} Jy")
+    print(f"  -> Calibration Error:  {stats['calibration_error_jy']:.6f} Jy ({flux_scale_err*100:.1f}%)")
     print(f"Mean Flux:         {stats['mean_flux_jy_beam']:.6e} Jy/beam")
-    print(f"Integrated Noise:  {stats['integrated_noise_jy']:.6f} Jy")
     print(f"Valid Pixels:      {stats['n_pixels']}")
     print(f"Independent Beams: {stats['n_beams']:.2f}")
 
@@ -105,30 +110,36 @@ def main():
     parser.add_argument("-i2", "--image2", help="Path to secondary FITS image for comparison")
     parser.add_argument("-m1", "--mask1", help="Path to FITS mask for image1")
     parser.add_argument("-m2", "--mask2", help="Path to FITS mask for image2")
+    parser.add_argument("-fe", "--flux_err", type=float, default=0.10, 
+                        help="Fractional flux scale error (default: 0.10, typical for LOFAR HBA). Pass 0 to disable.")
     
     args = parser.parse_args()
 
     # Process Image 1
-    stats1 = process_image(args.image1, args.source_reg, args.noise_reg, args.mask1)
-    print_stats("Image 1", stats1)
+    stats1 = process_image(args.image1, args.source_reg, args.noise_reg, args.mask1, args.flux_err)
+    print_stats("Image 1", stats1, args.flux_err)
 
     # Process Image 2 (If provided)
     if args.image2:
-        stats2 = process_image(args.image2, args.source_reg, args.noise_reg, args.mask2)
-        print_stats("Image 2", stats2)
+        stats2 = process_image(args.image2, args.source_reg, args.noise_reg, args.mask2, args.flux_err)
+        print_stats("Image 2", stats2, args.flux_err)
         
-        # Print Comparison
-        print(f"\n{'='*40}")
+        # Print Comparison with propagated errors
+        print(f"\n{'='*50}")
         print("COMPARISON (Image 1 vs Image 2)")
-        print(f"{'='*40}")
+        print(f"{'='*50}")
+        
         diff_flux = stats1['flux_jy'] - stats2['flux_jy']
+        # Error on difference: sqrt(err1^2 + err2^2)
+        diff_err = np.sqrt(stats1['total_flux_error_jy']**2 + stats2['total_flux_error_jy']**2)
+        
         ratio_flux = stats1['flux_jy'] / stats2['flux_jy'] if stats2['flux_jy'] != 0 else np.nan
         
-        print(f"Flux Difference (1 - 2): {diff_flux:.6f} Jy")
+        print(f"Image 1 Flux:            {stats1['flux_jy']:.6f} +/- {stats1['total_flux_error_jy']:.6f} Jy")
+        print(f"Image 2 Flux:            {stats2['flux_jy']:.6f} +/- {stats2['total_flux_error_jy']:.6f} Jy")
+        print(f"Flux Difference (1 - 2): {diff_flux:.6f} +/- {diff_err:.6f} Jy")
         print(f"Flux Ratio (1 / 2):      {ratio_flux:.4f}")
-        print(f"\nImage 1 Flux: {stats1['flux_jy']:.6f} +/- {stats1['integrated_noise_jy']:.6f} Jy")
-        print(f"Image 2 Flux: {stats2['flux_jy']:.6f} +/- {stats2['integrated_noise_jy']:.6f} Jy")
-        print(f"{'='*40}\n")
+        print(f"{'='*50}\n")
 
 if __name__ == "__main__":
     main()
