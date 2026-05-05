@@ -29,7 +29,7 @@ def create_region_mask(region_path, wcs, shape):
                 
     return full_mask
 
-def process_image(img_path, source_reg_path, noise_reg_path, fits_mask_path=None, flux_scale_err=0.10):
+def process_image(img_path, source_reg_path, noise_reg_path=None, fits_mask_path=None, flux_scale_err=0.10):
     """Extracts data, applies masks, and calculates all requested statistics."""
     # 1. Load Image Data
     with fits.open(img_path) as hdul:
@@ -45,39 +45,37 @@ def process_image(img_path, source_reg_path, noise_reg_path, fits_mask_path=None
             fits_mask = hdul[0].data.squeeze().astype(bool)
             data[~fits_mask] = np.nan
 
-    # 3. Create region masks
+    # 3. Create source mask and extract pixels
     source_mask = create_region_mask(source_reg_path, wcs, data.shape)
-    noise_mask = create_region_mask(noise_reg_path, wcs, data.shape)
-
-    # 4. Extract valid pixels
     source_pixels = data[source_mask]
     source_pixels = source_pixels[~np.isnan(source_pixels)]
-    
-    noise_pixels = data[noise_mask]
-    noise_pixels = noise_pixels[~np.isnan(noise_pixels)]
 
-    # 5. Calculate Statistics
+    # 4. Calculate Source Statistics
     stats = {}
-    
-    # Noise Stats
-    stats['noise_rms'] = np.sqrt(np.mean(noise_pixels**2))
-    stats['noise_std'] = np.std(noise_pixels)
-    stats['noise_robust'] = mad_std(noise_pixels)
-    
-    # Source Stats
     stats['n_pixels'] = len(source_pixels)
     stats['n_beams'] = stats['n_pixels'] / beam_area_pix
-    
     stats['mean_flux_jy_beam'] = np.mean(source_pixels)
     stats['flux_jy'] = np.sum(source_pixels) / beam_area_pix
-    
-    # Integrated thermal noise: RMS_beam * sqrt(N_beams)
-    # Using robust noise (MAD) as the baseline for radio astronomy
-    stats['integrated_noise_jy'] = stats['noise_robust'] * np.sqrt(stats['n_beams'])
-
-    # Total Flux Error: Sqrt( Thermal_Noise^2 + (Flux_Scale_Error * Total_Flux)^2 )
     stats['calibration_error_jy'] = flux_scale_err * stats['flux_jy']
-    stats['total_flux_error_jy'] = np.sqrt(stats['integrated_noise_jy']**2 + stats['calibration_error_jy']**2)
+    
+    # 5. Handle optional noise region
+    stats['has_noise'] = False
+    if noise_reg_path:
+        noise_mask = create_region_mask(noise_reg_path, wcs, data.shape)
+        noise_pixels = data[noise_mask]
+        noise_pixels = noise_pixels[~np.isnan(noise_pixels)]
+
+        stats['has_noise'] = True
+        stats['noise_rms'] = np.sqrt(np.mean(noise_pixels**2))
+        stats['noise_std'] = np.std(noise_pixels)
+        stats['noise_robust'] = mad_std(noise_pixels)
+        stats['integrated_noise_jy'] = stats['noise_robust'] * np.sqrt(stats['n_beams'])
+        
+        # Total Error: Sqrt( Thermal_Noise^2 + Cal_Error^2 )
+        stats['total_flux_error_jy'] = np.sqrt(stats['integrated_noise_jy']**2 + stats['calibration_error_jy']**2)
+    else:
+        # Without a noise region, the total error is strictly the calibration error
+        stats['total_flux_error_jy'] = stats['calibration_error_jy']
 
     return stats
 
@@ -89,29 +87,35 @@ def print_stats(name, stats, flux_scale_err):
     
     print("\n--- Source Region ---")
     print(f"Total Flux:        {stats['flux_jy']:.6f} +/- {stats['total_flux_error_jy']:.6f} Jy")
-    print(f"  -> Thermal Int. Noise: {stats['integrated_noise_jy']:.6f} Jy")
+    
+    if stats['has_noise']:
+        print(f"  -> Thermal Int. Noise: {stats['integrated_noise_jy']:.6f} Jy")
+    else:
+        print(f"  -> Thermal Int. Noise: [Skipped - No noise region provided]")
+        
     print(f"  -> Calibration Error:  {stats['calibration_error_jy']:.6f} Jy ({flux_scale_err*100:.1f}%)")
     print(f"Mean Flux:         {stats['mean_flux_jy_beam']:.6e} Jy/beam")
     print(f"Valid Pixels:      {stats['n_pixels']}")
     print(f"Independent Beams: {stats['n_beams']:.2f}")
 
-    print("\n--- Background Noise Region ---")
-    print(f"DS9 RMS:           {stats['noise_rms']:.6e} Jy/beam")
-    print(f"DS9 StdDev:        {stats['noise_std']:.6e} Jy/beam")
-    print(f"Robust Noise (MAD):{stats['noise_robust']:.6e} Jy/beam")
+    if stats['has_noise']:
+        print("\n--- Background Noise Region ---")
+        print(f"DS9 RMS:           {stats['noise_rms']:.6e} Jy/beam")
+        print(f"DS9 StdDev:        {stats['noise_std']:.6e} Jy/beam")
+        print(f"Robust Noise (MAD):{stats['noise_robust']:.6e} Jy/beam")
 
 def main():
     parser = argparse.ArgumentParser(description="Calculate radio flux and noise from FITS images using DS9 regions.")
     parser.add_argument("-i1", "--image1", required=True, help="Path to primary FITS image")
     parser.add_argument("-sr", "--source_reg", required=True, help="Path to DS9 source region file")
-    parser.add_argument("-nr", "--noise_reg", required=True, help="Path to DS9 noise region file")
     
     # Optional arguments
+    parser.add_argument("-nr", "--noise_reg", help="Path to DS9 noise region file (Optional)")
     parser.add_argument("-i2", "--image2", help="Path to secondary FITS image for comparison")
     parser.add_argument("-m1", "--mask1", help="Path to FITS mask for image1")
     parser.add_argument("-m2", "--mask2", help="Path to FITS mask for image2")
     parser.add_argument("-fe", "--flux_err", type=float, default=0.10, 
-                        help="Fractional flux scale error (default: 0.10, typical for LOFAR HBA). Pass 0 to disable.")
+                        help="Fractional flux scale error (default: 0.10). Pass 0 to disable.")
     
     args = parser.parse_args()
 
